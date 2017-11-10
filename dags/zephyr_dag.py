@@ -5,7 +5,7 @@ import os
 
 from airflow import DAG
 from airflow.models import Variable
-from airflow.operators import PythonOperator
+from airflow.operators import PythonOperator, S3KeySensor
 
 AIRFLOW_EMAIL = os.environ.get("AIRFLOW_EMAIL")
 
@@ -26,6 +26,7 @@ default_args = {
 
 dag = DAG('submit_validations', default_args=default_args)
 
+# batches validations and saves job id and output s3 path info in environment variable
 t1 = PythonOperator(
     task_id='batch_validations',
     python_callable='run_validations',
@@ -36,13 +37,24 @@ t1 = PythonOperator(
 
 t2 = PythonOperator(
     task_id='wait_for_queue',
-    python_callable='send_to_argo',
+    python_callable='wait_to_queue',
     dag=dag
 )
 
-t3 = PythonOperator(
-    task_id='block_until_finished_and_deliver',
-    python_callable='block_until_finished_and_deliver',
+for job in Variable.get('jobs'):
+    output_s3_path = 's3://14d-retention/validation_output/prod/{val_type}/{ds}/{job_id}'.format(val_type=Variable.get('validation_type'),
+                                                                                                 ds={{ds}},
+                                                                                                 job_id=job),
+    detect_output_s3_path = S3KeySensor(
+        task_id='wait_for_delivery_to_{}'.format(output_s3_path),
+        bucket_key=output_s3_path,
+        dag=dag
+    )
+    detect_output_s3_path.set_upstream(t2)
+
+t3 = S3KeySensor(
+    task_id='wait_for_delivery',
+    bucket_key='',
     dag=dag
 )
 
@@ -55,21 +67,3 @@ t4 = PythonOperator(
 t2.set_upstream(t1)
 t3.set_upstream(t2)
 t4.set_upstream(t3)
-
-
-def execute():
-    arg_parser = argparse.ArgumentParser(description='Submits a list of items for validation, waits for their '
-                                                     'results, and saves them to S3. Validation items are specified '
-                                                     'by an S3 URI.')
-    arg_parser.add_argument('--s3-path', required=True,
-                            help='The full S3 path of the validation items. Must be a line-separated file, '
-                                 'or a folder of line-separated files.')
-    arg_parser.add_argument('--validation-type', required=True)
-
-    args = arg_parser.parse_args()
-
-    Variable['s3_path'] = args.s3_path
-    Variable['validation_type'] = args.validation-type
-
-if __name__ == '__main__':
-    execute()
